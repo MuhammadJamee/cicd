@@ -1,0 +1,93 @@
+image: gitlab.healthcareit.et:8443/artificialintelligence/images/alpine-python36
+
+variables:
+    AWS_DEFAULT_REGION: "us-east-1"
+    AIP_AWS_PROFILE : "provided"
+    #DOCKER_REGISTERY: 811521548026.dkr.ecr.us-east-1.amazonaws.com
+    #APP_NAME: streamlit_chatbot_tester
+    DOCKER_HOST: tcp://docker:2375
+    REPOSITORY_URL: <AWS ACCOUNT ID>.dkr.ecr.eu-central-1.amazonaws.com/<ECS REPOSITORY NAME>
+    REGION: us-east-1
+    TASK_DEFINTION_NAME: <TASK DEFINITION NAME>
+    CLUSTER_NAME: <CLUSTER NAME>
+    SERVICE_NAME: <SERVICE NAME>
+
+stages:
+    - deploy
+
+include:
+    - project: "artificialintelligence/aip/aip-cicd"
+      file: "gitlab-ci/.gitlab-deploy-service-instance.yml"
+
+.deploy_after_script:
+    after_script: &deploy_after_script
+        - |    
+          source activate py36 
+          pip install boto3
+          pip install --upgrade setuptools
+          pip install aip-cli --extra-index-url https://artifactory.healthcare.net/artifactory/api/pypi/ai-python-snapshot/simple
+          pip uninstall awscli -y
+          yum update -y
+          yum install docker -y
+          service docker start
+          IMAGE_TAG="$(echo $CI_COMMIT_SHA | head -c 8)"
+          $(aws ecr get-login --no-include-email --region "${REGION}")
+        #   docker build -t $DOCKER_REGISTERY/$APP_NAME
+        #   aws ecr get-login-password | docker login --username AWS --pasword-stdin $DOCKER_REGISTERY
+        #   docker push $DOCKER_REGISTERY/$APP_NAME
+          echo "Building image..."
+          docker build -t $REPOSITORY_URL:latest .
+          echo "Tagging image..."
+          docker tag $REPOSITORY_URL:latest $REPOSITORY_URL:$IMAGE_TAG
+          echo "Pushing image..."
+          docker push $REPOSITORY_URL:latest
+          docker push $REPOSITORY_URL:$IMAGE_TAG
+          echo $REPOSITORY_URL:$IMAGE_TAG
+          TASK_DEFINITION=$(aws ecs describe-task-definition --task-definition "$TASK_DEFINTION_NAME" --region "${REGION}")
+          NEW_CONTAINER_DEFINTIION=$(echo $TASK_DEFINITION | python $CI_PROJECT_DIR/update_task_definition_image.py $REPOSITORY_URL:$IMAGE_TAG)
+          echo "Registering new container definition..."
+          aws ecs register-task-definition --region "${REGION}" --family "${TASK_DEFINTION_NAME}" --container-definitions "${NEW_CONTAINER_DEFINTIION}"
+          echo "Updating the service..."
+          aws ecs update-service --region "${REGION}" --cluster "${CLUSTER_NAME}" --service "${SERVICE_NAME}"  --task-definition "${TASK_DEFINTION_NAME}"
+  only:
+    - master
+
+
+.stop_after_script
+    after_script: &stop_after_script
+        - |
+           log () {
+               echo "$1 [$(date '+%Y-%m--%d %H:%M':%S')]"
+           }
+           set +e
+           set -x
+
+           echo $AWS_DEFAULT_REGION
+           echo $AIP_AWS_PROFILE
+
+           source activate py36
+           pip install boto3
+           pip install --upgrade setuptools
+           pip install aip-cli --extra-index-url https://artifactory.healthcare.net/artifactory/api/pypi/ai-python-snapshot/simple 
+
+           aip li --namespace $namespace
+           aip di -n $INSTANCE_NAME --namespace $namespace
+
+deploy_dev:
+    stage: deploy
+    extendes: .deploy_dev
+    services:
+        - name: gitlab.healthcareit.net:8443/artificialintelligence/images/docker-in-docker
+          alias: docker
+    after_script: *deploy_after_script
+    variables:
+        PATH_S3: "users/sbozoglan"
+    tags:
+        - development
+
+stop_dev:
+    stage: deploy
+    extendes: .stop_dev
+    after_script: *stop_after_script
+    tags:
+        - development
